@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lease-lab"
+version = "0.1.0"
+description = "Deterministic lease semantics laboratory"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+]
+
+[project.optional-dependencies]
+test = [
+  "httpx>=0.26",
+  "pytest>=7.4",
+]
+
+[project.scripts]
+lease-lab = "lease_lab.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["lease_lab*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
