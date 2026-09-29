@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>租约语义演算器</title>
+<style>
+  :root { --bg:#0f1420; --panel:#1a2233; --line:#2c3a55; --fg:#e6ecf5; --dim:#8fa1bd;
+          --ok:#3fb96f; --exp:#e0a13c; --nh:#5aa2e0; --st:#e05a5a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+         background:var(--bg); color:var(--fg); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:18px; margin:0; }
+  select, input, button { background:#101828; color:var(--fg); border:1px solid var(--line);
+           border-radius:6px; padding:6px 8px; font:inherit; font-size:13px; }
+  button { cursor:pointer; background:#1f2c44; }
+  button:hover { background:#27395a; }
+  main { display:grid; grid-template-columns: 1fr 1fr; gap:14px; padding:14px 20px; }
+  .panels { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; grid-column:1 / -1; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .panel h2 { font-size:13px; margin:0 0 8px; color:var(--dim); text-transform:uppercase; }
+  .kv { font-size:13px; line-height:1.7; white-space:pre-wrap; word-break:break-all; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; color:#0b0f18; }
+  .b-accepted { background:var(--ok); } .b-granted { background:var(--ok); } .b-renewed { background:var(--ok); }
+  .b-lease_expired { background:var(--exp); } .b-not_holder { background:var(--nh); }
+  .b-stale_token { background:var(--st); } .b-dropped { background:#9a6ae0; }
+  .b-busy { background:#c9c25a; } .b-other { background:var(--dim); }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  section h2 { font-size:14px; margin:0 0 10px; }
+  form { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; align-items:center; }
+  form label { font-size:12px; color:var(--dim); }
+  #events { max-height:420px; overflow:auto; font-size:12px; }
+  #events table { width:100%; border-collapse:collapse; }
+  #events td, #events th { border-bottom:1px solid var(--line); padding:4px 6px; text-align:left; vertical-align:top; }
+  #msg { min-height:18px; font-size:13px; margin:6px 0; }
+  .err { color:var(--st); } .ok { color:var(--ok); }
+  .expired { color:var(--exp); } .valid { color:var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1>租约语义演算器</h1>
+  <label>场景 <select id="scenario"></select></label>
+  <label>分支 <select id="branch"></select></label>
+  <button id="newScenario">新建场景</button>
+  <button id="forkBranch">fork 分支</button>
+  <button id="seedBtn">载入预置场景</button>
+  <button id="exportBtn">导出</button>
+  <button id="importBtn">导入</button>
+</header>
+<main>
+  <div class="panels">
+    <div class="panel" id="p-coord"><h2>协调端</h2><div class="kv" id="coord"></div></div>
+    <div class="panel" id="p-ca"><h2>客户端 client-A</h2><div class="kv" id="ca"></div></div>
+    <div class="panel" id="p-cb"><h2>客户端 client-B</h2><div class="kv" id="cb"></div></div>
+    <div class="panel" id="p-res"><h2>资源侧判断</h2><div class="kv" id="res"></div></div>
+  </div>
+
+  <section>
+    <h2>追加动作（显式 tick 推进，无墙上时间）</h2>
+    <div id="msg"></div>
+    <form id="f-tick">tick 步数 <input id="tickN" type="number" value="1" min="1" style="width:60px">
+      <button>tick</button></form>
+    <form id="f-acquire"><label>client <input id="acqClient" value="client-A"></label>
+      <label>resource <input id="acqRes" value="resource-R"></label><button>acquire</button></form>
+    <form id="f-renew"><label>client <input id="renClient" value="client-A"></label>
+      <label>resource <input id="renRes" value="resource-R"></label><button>renew</button></form>
+    <form id="f-write"><label>client <input id="wrClient" value="client-A"></label>
+      <label>resource <input id="wrRes" value="resource-R"></label>
+      <label>token <input id="wrToken" type="number" value="1" style="width:60px"></label>
+      <label>value <input id="wrValue" value="v1"></label><button>write</button></form>
+    <form id="f-pause"><label>client <input id="pauseClient" value="client-A"></label>
+      <button data-t="pause">pause</button><button data-t="resume">resume</button>
+      <button data-t="partition">partition</button><button data-t="heal">heal</button></form>
+    <form id="f-create"><label>client <input id="newClient" placeholder="client-C"></label>
+      <button data-t="client">+ client</button>
+      <label>resource <input id="newRes" placeholder="resource-S"></label>
+      <label>ttl <input id="newTtl" type="number" value="10" style="width:60px"></label>
+      <button data-t="resource">+ resource</button></form>
+  </section>
+
+  <section>
+    <h2>事件日志（不可变，当前状态由此推导）</h2>
+    <div id="events"></div>
+  </section>
+</main>
+<script>
+let scenarios = [], scenario = null, branch = null, version = 0;
+const $ = id => document.getElementById(id);
+const RESULT_LABEL = {
+  accepted: "accepted", granted: "granted", renewed: "renewed", busy: "busy",
+  lease_expired: "lease expired", not_holder: "not holder",
+  stale_token: "stale token", dropped: "dropped (partition)"
+};
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  return { status: r.status, body };
+}
+function msg(text, cls) { $("msg").innerHTML = text ? `<span class="${cls}">${text}</span>` : ""; }
+
+async function loadScenarios() {
+  scenarios = await api("/api/scenarios").then(x => x.body);
+  const sel = $("scenario"); sel.innerHTML = "";
+  for (const s of scenarios) {
+    const o = document.createElement("option");
+    o.value = s.id; o.textContent = `#${s.id} ${s.name}`; sel.appendChild(o);
+  }
+  if (scenario && scenarios.some(s => s.id === scenario.id)) sel.value = scenario.id;
+  await pickScenario();
+}
+async function pickScenario() {
+  const id = Number($("scenario").value);
+  scenario = scenarios.find(s => s.id === id) || null;
+  const sel = $("branch"); sel.innerHTML = "";
+  if (!scenario) { render(); return; }
+  for (const b of scenario.branches) {
+    const o = document.createElement("option");
+    o.value = b.id; o.textContent = `${b.name} (v${b.version})`; sel.appendChild(o);
+  }
+  if (branch && scenario.branches.some(b => b.id === branch.id)) sel.value = branch.id;
+  await pickBranch();
+}
+async function pickBranch() {
+  const id = Number($("branch").value);
+  branch = scenario.branches.find(b => b.id === id) || null;
+  await refresh();
+}
+async function refresh() {
+  if (!branch) { render(); return; }
+  const [st, ev] = await Promise.all([
+    api(`/api/branches/${branch.id}/state`), api(`/api/branches/${branch.id}/events`)]);
+  render(st.body, ev.body);
+}
+
+function clientPanel(el, c) {
+  if (!c) { el.innerHTML = "<i>未创建</i>"; return; }
+  el.innerHTML =
+    `可观察时间: ${c.observable_time}\n` +
+    `状态: ${c.paused ? "已暂停" : "运行中"}${c.partitioned ? " / 分区中" : ""}`;
+}
+
+function render(state, events) {
+  if (!state) { $("coord").textContent = "无场景"; $("ca").textContent = $("cb").textContent = $("res").textContent = ""; $("events").innerHTML = ""; return; }
+  version = events.length;
+  $("coord").textContent = `协调端时间: ${state.coordinator_time}`;
+  clientPanel($("ca"), state.clients["client-A"]);
+  clientPanel($("cb"), state.clients["client-B"]);
+  let html = "";
+  for (const [name, r] of Object.entries(state.resources)) {
+    const valid = r.holder && state.coordinator_time < r.expires_at;
+    html += `${name}: holder=${r.holder ?? "-"} token=${r.token} ` +
+      `expires_at=${r.expires_at} <span class="${valid ? "valid" : "expired"}">${valid ? "lease valid" : "lease expired"}</span>\n` +
+      `  value=${JSON.stringify(r.value)} ttl=${r.ttl}\n`;
+  }
+  const lastWrite = [...events].reverse().find(e => e.action.type === "write");
+  if (lastWrite) {
+    const o = lastWrite.outcome;
+    html += `\n最近写判定: <span class="badge b-${o.result}">${RESULT_LABEL[o.result] || o.result}</span>` +
+      ` (token ${lastWrite.action.token} vs 当前 token ${o.current_token ?? "-"})`;
+  }
+  $("res").innerHTML = html;
+
+  let rows = `<tr><th>#</th><th>动作</th><th>结果</th></tr>`;
+  for (const e of events) {
+    const o = e.outcome, res = o.result || "ok";
+    rows += `<tr><td>${e.seq}</td><td>${esc(JSON.stringify(e.action))}</td>` +
+      `<td><span class="badge b-${res in RESULT_LABEL ? res : "other"}">${RESULT_LABEL[res] || res}</span> ${esc(extra(o))}</td></tr>`;
+  }
+  $("events").innerHTML = `<table>${rows}</table>`;
+}
+function extra(o) {
+  const parts = [];
+  if (o.token !== undefined) parts.push(`token=${o.token}`);
+  if (o.expires_at !== undefined) parts.push(`expires_at=${o.expires_at}`);
+  if (o.coordinator_time !== undefined) parts.push(`coord=${o.coordinator_time}`);
+  if (o.client_observable_time !== undefined) parts.push(`client=${o.client_observable_time}`);
+  return parts.join(" ");
+}
+function esc(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+async function append(action) {
+  if (!branch) { msg("请先创建场景", "err"); return false; }
+  const key = `ui-${branch.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const r = await api(`/api/branches/${branch.id}/actions`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_version: version, idempotency_key: key, action })
+  });
+  if (r.status === 409 && r.body.error === "version_conflict") {
+    msg(`版本冲突：当前分支尾事件为 #${r.body.tail ? r.body.tail.seq : 0}，已刷新`, "err");
+    await loadScenarios(); return false;
+  }
+  if (r.status >= 400) { msg("失败: " + JSON.stringify(r.body), "err"); return false; }
+  const o = r.body.event.outcome, res = o.result || "ok";
+  msg(`事件 #${r.body.event.seq} → ${RESULT_LABEL[res] || res}${r.body.replayed ? "（幂等重放）" : ""}`,
+      r.body.event.ok === false ? "err" : "ok");
+  await loadScenarios(); return true;
+}
+
+$("f-tick").onsubmit = e => { e.preventDefault(); append({ type: "tick", n: Number($("tickN").value) }); };
+$("f-acquire").onsubmit = e => { e.preventDefault(); append({ type: "acquire", client: $("acqClient").value, resource: $("acqRes").value }); };
+$("f-renew").onsubmit = e => { e.preventDefault(); append({ type: "renew", client: $("renClient").value, resource: $("renRes").value }); };
+$("f-write").onsubmit = e => { e.preventDefault(); append({ type: "write", client: $("wrClient").value, resource: $("wrRes").value, token: Number($("wrToken").value), value: $("wrValue").value }); };
+$("f-pause").querySelectorAll("button").forEach(b => b.onclick = e => {
+  e.preventDefault(); append({ type: b.dataset.t, client: $("pauseClient").value }); });
+$("f-create").querySelectorAll("button").forEach(b => b.onclick = e => {
+  e.preventDefault();
+  if (b.dataset.t === "client") append({ type: "create_client", client: $("newClient").value });
+  else append({ type: "create_resource", resource: $("newRes").value, ttl: Number($("newTtl").value) });
+});
+$("scenario").onchange = pickScenario;
+$("branch").onchange = pickBranch;
+$("newScenario").onclick = async () => {
+  const name = prompt("场景名称", "新场景"); if (!name) return;
+  await api("/api/scenarios", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+  scenario = null; branch = null; await loadScenarios();
+};
+$("forkBranch").onclick = async () => {
+  if (!branch) return;
+  const name = prompt("新分支名称", branch.name + "-fork"); if (!name) return;
+  const at = prompt("从事件序号 fork（留空 = 分支尾部）", "");
+  await api(`/api/branches/${branch.id}/fork`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, at_seq: at ? Number(at) : null }) });
+  await loadScenarios();
+};
+$("seedBtn").onclick = async () => { await api("/api/seed", { method: "POST" }); await loadScenarios(); };
+$("exportBtn").onclick = async () => {
+  if (!scenario) return;
+  const data = await api(`/api/scenarios/${scenario.id}/export`).then(x => x.body);
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = `scenario-${scenario.id}.json`; a.click();
+};
+$("importBtn").onclick = () => {
+  const inp = document.createElement("input"); inp.type = "file"; inp.accept = ".json";
+  inp.onchange = async () => {
+    const data = JSON.parse(await inp.files[0].text());
+    const r = await api("/api/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data }) });
+    msg(r.status < 400 ? "导入成功" : "导入失败: " + JSON.stringify(r.body), r.status < 400 ? "ok" : "err");
+    await loadScenarios();
+  };
+  inp.click();
+};
+
+(async () => { await api("/api/seed", { method: "POST" }); await loadScenarios(); })();
+</script>
+</body>
+</html>
